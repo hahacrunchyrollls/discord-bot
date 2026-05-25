@@ -309,7 +309,7 @@ function withTimeout(promise, timeoutMs) {
   ]);
 }
 
-async function searchSongChoices(query) {
+function getCachedSongChoices(query) {
   const cleanQuery = query.trim();
   if (!cleanQuery || cleanQuery.length < 2 || isLikelyUrl(cleanQuery)) return [];
 
@@ -319,10 +319,19 @@ async function searchSongChoices(query) {
     return cached.choices;
   }
 
+  return fallbackSongChoice(cleanQuery);
+}
+
+async function refreshSongChoices(query) {
+  const cleanQuery = query.trim();
+  if (!cleanQuery || cleanQuery.length < 2 || isLikelyUrl(cleanQuery)) return;
+
+  const cacheKey = cleanQuery.toLowerCase();
+  const cached = autocompleteCache.get(cacheKey);
+  if (cached && Date.now() - cached.createdAt < 60_000) return;
+
   const result = await withTimeout(ytSearch(cleanQuery), AUTOCOMPLETE_TIMEOUT_MS);
-  if (!result?.videos?.length) {
-    return fallbackSongChoice(cleanQuery);
-  }
+  if (!result?.videos?.length) return;
 
   const choices = result.videos
     .slice(0, 10)
@@ -336,23 +345,25 @@ async function searchSongChoices(query) {
   }
 
   autocompleteCache.set(cacheKey, { choices, createdAt: Date.now() });
-  return choices;
 }
 
 async function handleAutocomplete(interaction) {
   const focused = interaction.options.getFocused(true);
   if (interaction.commandName !== "play" || focused.name !== "title") {
-    await interaction.respond([]);
+    await interaction.respond([]).catch(() => null);
     return;
   }
 
-  try {
-    const choices = await searchSongChoices(focused.value);
-    await interaction.respond(choices);
-  } catch (error) {
-    console.error("Could not load autocomplete choices:", error);
-    await interaction.respond(fallbackSongChoice(focused.value));
-  }
+  const choices = getCachedSongChoices(focused.value);
+  await interaction.respond(choices).catch(error => {
+    if (error?.code !== 10062) {
+      console.error("Could not respond to autocomplete:", error);
+    }
+  });
+
+  refreshSongChoices(focused.value).catch(error => {
+    console.error("Could not refresh autocomplete choices:", error);
+  });
 }
 
 async function safelyRespondToInteractionError(interaction, message) {

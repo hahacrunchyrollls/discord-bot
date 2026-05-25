@@ -50,6 +50,37 @@ Add these environment variables in Render:
 
 Spotify credentials are recommended because Spotify links provide metadata. Playback is resolved through available audio sources because Spotify itself does not provide raw Discord-playable audio streams.
 
+## Debian 13 VPS Installer
+
+On your Debian 13 VPS, clone your bot repo, then run:
+
+```bash
+git clone https://github.com/hahacrunchyrollls/discord-bot.git
+cd discord-bot
+sudo bash install-debian13.sh
+```
+
+You can also run the installer as a standalone script. If it does not find `package.json` beside the script, it will clone `https://github.com/hahacrunchyrollls/discord-bot.git` into `/opt/discord-music-bot`.
+
+Optional overrides:
+
+```bash
+sudo INSTALL_DIR=/opt/my-bot REPO_BRANCH=main bash install-debian13.sh
+```
+
+After install, edit your `.env` file:
+
+```bash
+nano .env
+```
+
+Start and view logs:
+
+```bash
+sudo systemctl start discord-music-bot.service
+sudo journalctl -u discord-music-bot.service -f
+```
+
 ## Voice Connection Troubleshooting
 
 If you see `VOICE_CONNECT_FAILED`, check these first:
