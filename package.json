@@ -1,0 +1,23 @@
+{
+  "name": "render-discord-music-bot",
+  "version": "1.0.0",
+  "description": "Discord music bot with Spotify support, queue, chat player UI, and Render deployment.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.18.0",
+    "@distube/spotify": "^2.0.2",
+    "@distube/yt-dlp": "^2.0.1",
+    "discord.js": "^14.19.3",
+    "distube": "^5.0.7",
+    "dotenv": "^16.5.0",
+    "express": "^4.19.2"
+  }
+}
