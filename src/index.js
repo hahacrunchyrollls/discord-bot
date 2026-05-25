@@ -91,6 +91,8 @@ const emptyVoiceTimers = new Map();
 const autocompleteCache = new Map();
 const autocompleteTitles = new Map();
 
+const AUTOCOMPLETE_TIMEOUT_MS = 1_800;
+
 async function registerCommands() {
   if (!clientId) {
     console.warn("CLIENT_ID is not set. Slash commands were not registered.");
@@ -267,6 +269,22 @@ function isLikelyUrl(value) {
   return /^https?:\/\//i.test(value);
 }
 
+function fallbackSongChoice(query) {
+  return [{
+    name: trimChoiceText(`Search for "${query}"`),
+    value: query
+  }];
+}
+
+function withTimeout(promise, timeoutMs) {
+  return Promise.race([
+    promise,
+    new Promise(resolve => {
+      setTimeout(() => resolve(null), timeoutMs);
+    })
+  ]);
+}
+
 async function searchSongChoices(query) {
   const cleanQuery = query.trim();
   if (!cleanQuery || cleanQuery.length < 2 || isLikelyUrl(cleanQuery)) return [];
@@ -277,7 +295,11 @@ async function searchSongChoices(query) {
     return cached.choices;
   }
 
-  const result = await ytSearch(cleanQuery);
+  const result = await withTimeout(ytSearch(cleanQuery), AUTOCOMPLETE_TIMEOUT_MS);
+  if (!result?.videos?.length) {
+    return fallbackSongChoice(cleanQuery);
+  }
+
   const choices = result.videos
     .slice(0, 10)
     .map(video => ({
@@ -305,7 +327,23 @@ async function handleAutocomplete(interaction) {
     await interaction.respond(choices);
   } catch (error) {
     console.error("Could not load autocomplete choices:", error);
-    await interaction.respond([]);
+    await interaction.respond(fallbackSongChoice(focused.value));
+  }
+}
+
+async function safelyRespondToInteractionError(interaction, message) {
+  if (interaction.isAutocomplete()) {
+    await interaction.respond([]).catch(() => null);
+    return;
+  }
+
+  if (interaction.deferred || interaction.replied) {
+    await interaction.followUp({ content: message, ephemeral: true }).catch(() => null);
+    return;
+  }
+
+  if (typeof interaction.reply === "function") {
+    await interaction.reply({ content: message, ephemeral: true }).catch(() => null);
   }
 }
 
@@ -320,16 +358,27 @@ async function handleSlashCommand(interaction) {
       return;
     }
 
-    await interaction.deferReply();
     const query = interaction.options.getString("title", true);
     const displayQuery = autocompleteTitles.get(query) || query;
     const queue = distube.getQueue(interaction.guildId);
 
-    await distube.play(voiceChannel, query, {
-      member: interaction.member,
-      textChannel: interaction.channel,
-      metadata: { interaction }
-    });
+    await interaction.reply(
+      queue
+        ? `Adding to queue: **${displayQuery}**`
+        : `Searching and connecting: **${displayQuery}**`
+    );
+
+    try {
+      await distube.play(voiceChannel, query, {
+        member: interaction.member,
+        textChannel: interaction.channel,
+        metadata: { interaction }
+      });
+    } catch (error) {
+      console.error(error);
+      await interaction.editReply(getFriendlyErrorMessage(error));
+      return;
+    }
 
     await interaction.editReply(
       queue
@@ -459,6 +508,10 @@ client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
+client.on("error", error => {
+  console.error("Discord client error:", error);
+});
+
 client.on("interactionCreate", async interaction => {
   try {
     if (interaction.isAutocomplete()) {
@@ -471,12 +524,7 @@ client.on("interactionCreate", async interaction => {
   } catch (error) {
     console.error(error);
     const message = getFriendlyErrorMessage(error);
-
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp({ content: message, ephemeral: true }).catch(() => null);
-    } else {
-      await interaction.reply({ content: message, ephemeral: true }).catch(() => null);
-    }
+    await safelyRespondToInteractionError(interaction, message);
   }
 });
 
