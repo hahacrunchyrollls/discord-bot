@@ -28,7 +28,9 @@ The bot registers slash commands on startup when `CLIENT_ID` is set.
 
 ## Discord Commands
 
-- `/play :<song name or spotify/youtube link>`
+- `/play title:<song name or spotify/youtube link>`
+  - Type a song title and pick from the autocomplete options.
+  - If music is already playing, the new song is added to the queue automatically.
 - `/queue`
 - `/nowplaying`
 - `/pause`
@@ -47,3 +49,13 @@ Add these environment variables in Render:
 - `SPOTIFY_CLIENT_SECRET`
 
 Spotify credentials are recommended because Spotify links provide metadata. Playback is resolved through available audio sources because Spotify itself does not provide raw Discord-playable audio streams.
+
+## Voice Connection Troubleshooting
+
+If you see `VOICE_CONNECT_FAILED`, check these first:
+
+- The bot has `Connect` and `Speak` permission in the voice channel.
+- The bot role is not blocked by channel-specific permission overrides.
+- The voice channel is not full.
+- You redeployed the latest code after changing commands.
+- If the error only happens on a hosting provider, make sure the host supports Discord voice connections.

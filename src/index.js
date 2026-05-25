@@ -8,16 +8,15 @@ const {
   Client,
   EmbedBuilder,
   GatewayIntentBits,
-  ModalBuilder,
+  PermissionFlagsBits,
   REST,
   Routes,
-  SlashCommandBuilder,
-  TextInputBuilder,
-  TextInputStyle
+  SlashCommandBuilder
 } = require("discord.js");
 const { DisTube } = require("distube");
 const { SpotifyPlugin } = require("@distube/spotify");
 const { YtDlpPlugin } = require("@distube/yt-dlp");
+const ytSearch = require("yt-search");
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.CLIENT_ID;
@@ -60,7 +59,14 @@ const distube = new DisTube(client, {
 const commands = [
   new SlashCommandBuilder()
     .setName("play")
-    .setDescription("Open the music player and add a song to the queue."),
+    .setDescription("Play a song or add it to the queue.")
+    .addStringOption(option =>
+      option
+        .setName("title")
+        .setDescription("Song title, Spotify link, or YouTube link")
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
   new SlashCommandBuilder()
     .setName("queue")
     .setDescription("Show the current music queue."),
@@ -82,6 +88,8 @@ const commands = [
 ].map(command => command.toJSON());
 
 const emptyVoiceTimers = new Map();
+const autocompleteCache = new Map();
+const autocompleteTitles = new Map();
 
 async function registerCommands() {
   if (!clientId) {
@@ -127,7 +135,7 @@ function scheduleLeaveIfAlone(voiceChannel, textChannel) {
     leaveVoice(guildId);
     playerMessages.delete(guildId);
     emptyVoiceTimers.delete(guildId);
-    textChannel?.send("Walang tao sa voice channel, kaya umalis na ako.").catch(() => null);
+    textChannel?.send("The voice channel is empty, so I left.").catch(() => null);
   }, 60_000);
 
   emptyVoiceTimers.set(guildId, timer);
@@ -167,7 +175,7 @@ function buildPlayerEmbed(queue) {
     return new EmbedBuilder()
       .setColor(0x2b2d31)
       .setTitle("Player idle")
-      .setDescription("Walang tugtog ngayon. Gumamit ng `/play` para magpatugtog.")
+      .setDescription("Nothing is playing right now. Use `/play` to start music.")
       .setFooter({ text: "Auto-leave is enabled when playback is done." });
   }
 
@@ -184,7 +192,7 @@ function buildPlayerEmbed(queue) {
     .addFields(
       { name: "Duration", value: formatDuration(song), inline: true },
       { name: "Requested by", value: song.user ? `<@${song.user.id}>` : "Unknown", inline: true },
-      { name: "Queue", value: nextSongs || "Wala pang kasunod.", inline: false }
+      { name: "Queue", value: nextSongs || "No songs queued next.", inline: false }
     )
     .setFooter({ text: `${queue.songs.length} song(s) in queue` });
 }
@@ -219,19 +227,27 @@ function getMemberVoiceChannel(interaction) {
   return interaction.member?.voice?.channel;
 }
 
-function buildPlayModal() {
-  const queryInput = new TextInputBuilder()
-    .setCustomId("play_query")
-    .setLabel("Song name, Spotify link, or YouTube link")
-    .setPlaceholder("Halimbawa: BINI Pantropiko or Spotify playlist link")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setMaxLength(300);
+function validateVoiceChannel(interaction, voiceChannel) {
+  if (!voiceChannel) {
+    return "Join a voice channel first.";
+  }
 
-  return new ModalBuilder()
-    .setCustomId("music:play_modal")
-    .setTitle("Play Music")
-    .addComponents(new ActionRowBuilder().addComponents(queryInput));
+  const botMember = interaction.guild?.members.me;
+  const permissions = botMember ? voiceChannel.permissionsFor(botMember) : null;
+
+  if (!permissions?.has(PermissionFlagsBits.Connect)) {
+    return "I do not have permission to join your voice channel. Please give me the Connect permission.";
+  }
+
+  if (!permissions.has(PermissionFlagsBits.Speak)) {
+    return "I do not have permission to speak in your voice channel. Please give me the Speak permission.";
+  }
+
+  if (voiceChannel.full && !permissions.has(PermissionFlagsBits.MoveMembers)) {
+    return "That voice channel is full, so I cannot join it right now.";
+  }
+
+  return null;
 }
 
 function requireQueue(interaction) {
@@ -242,23 +258,90 @@ function requireQueue(interaction) {
   return queue;
 }
 
+function trimChoiceText(text, maxLength = 100) {
+  if (!text) return "Unknown song";
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function isLikelyUrl(value) {
+  return /^https?:\/\//i.test(value);
+}
+
+async function searchSongChoices(query) {
+  const cleanQuery = query.trim();
+  if (!cleanQuery || cleanQuery.length < 2 || isLikelyUrl(cleanQuery)) return [];
+
+  const cacheKey = cleanQuery.toLowerCase();
+  const cached = autocompleteCache.get(cacheKey);
+  if (cached && Date.now() - cached.createdAt < 60_000) {
+    return cached.choices;
+  }
+
+  const result = await ytSearch(cleanQuery);
+  const choices = result.videos
+    .slice(0, 10)
+    .map(video => ({
+      name: trimChoiceText(`${video.title} - ${video.author?.name || "Unknown artist"}`),
+      value: video.url
+    }));
+
+  for (const choice of choices) {
+    autocompleteTitles.set(choice.value, choice.name);
+  }
+
+  autocompleteCache.set(cacheKey, { choices, createdAt: Date.now() });
+  return choices;
+}
+
+async function handleAutocomplete(interaction) {
+  const focused = interaction.options.getFocused(true);
+  if (interaction.commandName !== "play" || focused.name !== "title") {
+    await interaction.respond([]);
+    return;
+  }
+
+  try {
+    const choices = await searchSongChoices(focused.value);
+    await interaction.respond(choices);
+  } catch (error) {
+    console.error("Could not load autocomplete choices:", error);
+    await interaction.respond([]);
+  }
+}
+
 async function handleSlashCommand(interaction) {
   const { commandName } = interaction;
 
   if (commandName === "play") {
     const voiceChannel = getMemberVoiceChannel(interaction);
-    if (!voiceChannel) {
-      await interaction.reply({ content: "Pumasok ka muna sa voice channel.", ephemeral: true });
+    const voiceError = validateVoiceChannel(interaction, voiceChannel);
+    if (voiceError) {
+      await interaction.reply({ content: voiceError, ephemeral: true });
       return;
     }
 
-    await interaction.showModal(buildPlayModal());
+    await interaction.deferReply();
+    const query = interaction.options.getString("title", true);
+    const displayQuery = autocompleteTitles.get(query) || query;
+    const queue = distube.getQueue(interaction.guildId);
+
+    await distube.play(voiceChannel, query, {
+      member: interaction.member,
+      textChannel: interaction.channel,
+      metadata: { interaction }
+    });
+
+    await interaction.editReply(
+      queue
+        ? `Queued: **${displayQuery}**`
+        : `Playing: **${displayQuery}**`
+    );
     return;
   }
 
   const queue = requireQueue(interaction);
   if (!queue) {
-    await interaction.reply({ content: "Walang music na tumutugtog ngayon.", ephemeral: true });
+    await interaction.reply({ content: "No music is playing right now.", ephemeral: true });
     return;
   }
 
@@ -297,37 +380,42 @@ async function handleSlashCommand(interaction) {
     leaveVoice(interaction.guildId);
     playerMessages.delete(interaction.guildId);
     await interaction.reply("Stopped and left the voice channel.");
+    return;
   }
 }
 
-async function handlePlayModal(interaction) {
-  const voiceChannel = getMemberVoiceChannel(interaction);
-  if (!voiceChannel) {
-    await interaction.reply({ content: "Pumasok ka muna sa voice channel.", ephemeral: true });
-    return;
+function getFriendlyErrorMessage(error) {
+  if (error?.errorCode === "VOICE_CONNECT_FAILED") {
+    return [
+      "I could not connect to the voice channel within 30 seconds.",
+      "Please check that I have Connect and Speak permissions, then try moving to another voice channel.",
+      "If this only happens on Render, redeploy the latest code and make sure the host allows Discord voice connections."
+    ].join("\n");
   }
 
-  await interaction.deferReply();
-  const query = interaction.fields.getTextInputValue("play_query");
-  const queue = distube.getQueue(interaction.guildId);
+  if (error?.errorCode === "VOICE_MISSING_PERMS") {
+    return "I am missing voice permissions. Please give me Connect and Speak permissions for that voice channel.";
+  }
 
-  await distube.play(voiceChannel, query, {
-    member: interaction.member,
-    textChannel: interaction.channel,
-    metadata: { interaction }
-  });
+  if (error?.errorCode === "VOICE_FULL") {
+    return "That voice channel is full, so I cannot join it right now.";
+  }
 
-  await interaction.editReply(
-    queue
-      ? `Queued: **${query}**`
-      : `Playing: **${query}**`
-  );
+  if (error?.errorCode === "NO_RESULT") {
+    return "I could not find a playable result for that title. Try another song name or link.";
+  }
+
+  if (error?.errorCode === "NOT_SUPPORTED_URL") {
+    return "That link is not supported. Try a Spotify link, YouTube link, or song title.";
+  }
+
+  return "Something went wrong while processing that command.";
 }
 
 async function handlePlayerButton(interaction) {
   const queue = requireQueue(interaction);
   if (!queue) {
-    await interaction.reply({ content: "Walang active player ngayon.", ephemeral: true });
+    await interaction.reply({ content: "There is no active player right now.", ephemeral: true });
     return;
   }
 
@@ -373,16 +461,16 @@ client.once("ready", () => {
 
 client.on("interactionCreate", async interaction => {
   try {
-    if (interaction.isChatInputCommand()) {
+    if (interaction.isAutocomplete()) {
+      await handleAutocomplete(interaction);
+    } else if (interaction.isChatInputCommand()) {
       await handleSlashCommand(interaction);
-    } else if (interaction.isModalSubmit() && interaction.customId === "music:play_modal") {
-      await handlePlayModal(interaction);
     } else if (interaction.isButton() && interaction.customId.startsWith("music:")) {
       await handlePlayerButton(interaction);
     }
   } catch (error) {
     console.error(error);
-    const message = "May error habang pinoproseso yung command.";
+    const message = getFriendlyErrorMessage(error);
 
     if (interaction.deferred || interaction.replied) {
       await interaction.followUp({ content: message, ephemeral: true }).catch(() => null);
@@ -420,12 +508,12 @@ distube
     playerMessages.delete(queue.id);
     leaveVoice(queue.id);
     if (queue.textChannel) {
-      await queue.textChannel.send("Queue finished. Umalis na ako sa voice channel.");
+      await queue.textChannel.send("Queue finished. I left the voice channel.");
     }
   })
   .on("error", (error, queue) => {
     console.error(error);
-    queue?.textChannel?.send("Hindi ko ma-play yung request. Subukan ang ibang link o title.");
+    queue?.textChannel?.send("I could not play that request. Try another link or title.");
   });
 
 const app = express();
