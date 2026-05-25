@@ -237,6 +237,10 @@ function validateVoiceChannel(interaction, voiceChannel) {
   const botMember = interaction.guild?.members.me;
   const permissions = botMember ? voiceChannel.permissionsFor(botMember) : null;
 
+  if (!permissions?.has(PermissionFlagsBits.ViewChannel)) {
+    return "I do not have permission to view your voice channel. Please give me the View Channel permission.";
+  }
+
   if (!permissions?.has(PermissionFlagsBits.Connect)) {
     return "I do not have permission to join your voice channel. Please give me the Connect permission.";
   }
@@ -250,6 +254,26 @@ function validateVoiceChannel(interaction, voiceChannel) {
   }
 
   return null;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function playWithVoiceRetry(voiceChannel, query, options) {
+  try {
+    await distube.play(voiceChannel, query, options);
+  } catch (error) {
+    if (error?.errorCode !== "VOICE_CONNECT_FAILED") {
+      throw error;
+    }
+
+    leaveVoice(voiceChannel.guild.id);
+    await sleep(2_000);
+    await distube.play(voiceChannel, query, options);
+  }
 }
 
 function requireQueue(interaction) {
@@ -369,7 +393,7 @@ async function handleSlashCommand(interaction) {
     );
 
     try {
-      await distube.play(voiceChannel, query, {
+      await playWithVoiceRetry(voiceChannel, query, {
         member: interaction.member,
         textChannel: interaction.channel,
         metadata: { interaction }
@@ -436,7 +460,7 @@ async function handleSlashCommand(interaction) {
 function getFriendlyErrorMessage(error) {
   if (error?.errorCode === "VOICE_CONNECT_FAILED") {
     return [
-      "I could not connect to the voice channel within 30 seconds.",
+      "I could not connect to the voice channel after retrying.",
       "Please check that I have Connect and Speak permissions, then try moving to another voice channel.",
       "If this only happens on Render, redeploy the latest code and make sure the host allows Discord voice connections."
     ].join("\n");
