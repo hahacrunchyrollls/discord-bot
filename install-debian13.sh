@@ -16,6 +16,14 @@ log() {
   printf '\n[%s] %s\n' "$APP_NAME" "$*"
 }
 
+env_quote() {
+  local value="${1}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//\$/\\\$}"
+  printf '"%s"' "${value}"
+}
+
 require_debian() {
   if [[ ! -f /etc/debian_version ]]; then
     echo "This installer is intended for Debian-based systems."
@@ -112,29 +120,32 @@ install_dependencies() {
 prepare_env_file() {
   cd "${APP_DIR}"
   if [[ -f .env ]]; then
-    log ".env already exists. Keeping your current settings."
-    return
+    log ".env already exists."
+    read -r -p "Do you want to replace it with new values? [y/N]: " replace_env
+    if [[ ! "${replace_env}" =~ ^[Yy]$ ]]; then
+      log "Keeping your current .env settings."
+      return
+    fi
   fi
 
-  if [[ -f .env.example ]]; then
-    cp .env.example .env
-    chown "${RUN_USER}:${RUN_GROUP}" .env
-    chmod 600 .env
-    log "Created .env from .env.example. Edit it before starting the bot:"
-    echo "  nano ${APP_DIR}/.env"
-  else
-    cat > .env <<'EOF'
-DISCORD_TOKEN=your_discord_bot_token
-CLIENT_ID=your_discord_application_client_id
-SPOTIFY_CLIENT_ID=your_spotify_client_id
-SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
+  log "Enter your bot environment variables."
+  read -r -p "DISCORD_TOKEN: " discord_token
+  read -r -p "CLIENT_ID: " client_id
+  read -r -p "SPOTIFY_CLIENT_ID: " spotify_client_id
+  read -r -s -p "SPOTIFY_CLIENT_SECRET: " spotify_client_secret
+  printf '\n'
+
+  cat > .env <<EOF
+DISCORD_TOKEN=$(env_quote "${discord_token}")
+CLIENT_ID=$(env_quote "${client_id}")
+SPOTIFY_CLIENT_ID=$(env_quote "${spotify_client_id}")
+SPOTIFY_CLIENT_SECRET=$(env_quote "${spotify_client_secret}")
 PORT=3000
 EOF
-    chmod 600 .env
-    chown "${RUN_USER}:${RUN_GROUP}" .env
-    log "Created .env. Edit it before starting the bot:"
-    echo "  nano ${APP_DIR}/.env"
-  fi
+
+  chmod 600 .env
+  chown "${RUN_USER}:${RUN_GROUP}" .env
+  log "Saved environment variables to ${APP_DIR}/.env"
 }
 
 create_systemd_service() {

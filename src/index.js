@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
+const https = require("https");
 const {
   ActionRowBuilder,
   ButtonBuilder,
@@ -92,6 +93,7 @@ const autocompleteCache = new Map();
 const autocompleteTitles = new Map();
 
 const AUTOCOMPLETE_TIMEOUT_MS = 1_800;
+const SUGGEST_TIMEOUT_MS = 900;
 
 async function registerCommands() {
   if (!clientId) {
@@ -294,9 +296,12 @@ function isLikelyUrl(value) {
 }
 
 function fallbackSongChoice(query) {
+  const cleanQuery = query.trim();
+  if (!cleanQuery) return [];
+
   return [{
-    name: trimChoiceText(`Search for "${query}"`),
-    value: query
+    name: trimChoiceText(`Search for "${cleanQuery}"`),
+    value: cleanQuery
   }];
 }
 
@@ -309,9 +314,41 @@ function withTimeout(promise, timeoutMs) {
   ]);
 }
 
-function getCachedSongChoices(query) {
+function fetchYouTubeSuggestions(query) {
+  const encodedQuery = encodeURIComponent(query);
+  const url = `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${encodedQuery}`;
+
+  return new Promise(resolve => {
+    const request = https.get(url, response => {
+      let body = "";
+
+      response.setEncoding("utf8");
+      response.on("data", chunk => {
+        body += chunk;
+      });
+      response.on("end", () => {
+        try {
+          const parsed = JSON.parse(body);
+          const suggestions = Array.isArray(parsed?.[1]) ? parsed[1] : [];
+          resolve(suggestions.filter(Boolean).slice(0, 10));
+        } catch {
+          resolve([]);
+        }
+      });
+    });
+
+    request.setTimeout(SUGGEST_TIMEOUT_MS, () => {
+      request.destroy();
+      resolve([]);
+    });
+
+    request.on("error", () => resolve([]));
+  });
+}
+
+async function loadSongChoices(query) {
   const cleanQuery = query.trim();
-  if (!cleanQuery || cleanQuery.length < 2 || isLikelyUrl(cleanQuery)) return [];
+  if (!cleanQuery || isLikelyUrl(cleanQuery)) return fallbackSongChoice(cleanQuery);
 
   const cacheKey = cleanQuery.toLowerCase();
   const cached = autocompleteCache.get(cacheKey);
@@ -319,16 +356,38 @@ function getCachedSongChoices(query) {
     return cached.choices;
   }
 
+  const suggestions = await fetchYouTubeSuggestions(cleanQuery);
+  if (suggestions.length) {
+    const choices = suggestions.map(suggestion => ({
+      name: trimChoiceText(suggestion),
+      value: trimChoiceText(suggestion)
+    }));
+
+    autocompleteCache.set(cacheKey, { choices, createdAt: Date.now() });
+    return choices;
+  }
+
   return fallbackSongChoice(cleanQuery);
 }
 
 async function refreshSongChoices(query) {
   const cleanQuery = query.trim();
-  if (!cleanQuery || cleanQuery.length < 2 || isLikelyUrl(cleanQuery)) return;
+  if (!cleanQuery || isLikelyUrl(cleanQuery)) return;
 
   const cacheKey = cleanQuery.toLowerCase();
   const cached = autocompleteCache.get(cacheKey);
   if (cached && Date.now() - cached.createdAt < 60_000) return;
+
+  const suggestions = await fetchYouTubeSuggestions(cleanQuery);
+  if (suggestions.length) {
+    const choices = suggestions.map(suggestion => ({
+      name: trimChoiceText(suggestion),
+      value: trimChoiceText(suggestion)
+    }));
+
+    autocompleteCache.set(cacheKey, { choices, createdAt: Date.now() });
+    return;
+  }
 
   const result = await withTimeout(ytSearch(cleanQuery), AUTOCOMPLETE_TIMEOUT_MS);
   if (!result?.videos?.length) return;
@@ -354,16 +413,18 @@ async function handleAutocomplete(interaction) {
     return;
   }
 
-  const choices = getCachedSongChoices(focused.value);
+  const choices = await loadSongChoices(focused.value);
   await interaction.respond(choices).catch(error => {
     if (error?.code !== 10062) {
       console.error("Could not respond to autocomplete:", error);
     }
   });
 
-  refreshSongChoices(focused.value).catch(error => {
+  if (!autocompleteCache.has(focused.value.trim().toLowerCase())) {
+    refreshSongChoices(focused.value).catch(error => {
     console.error("Could not refresh autocomplete choices:", error);
-  });
+    });
+  }
 }
 
 async function safelyRespondToInteractionError(interaction, message) {
